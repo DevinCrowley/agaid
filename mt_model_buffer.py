@@ -4,6 +4,7 @@ from pathlib import Path
 import pickle
 from copy import deepcopy
 
+from ipdb import set_trace
 import numpy as np
 import torch
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
@@ -60,14 +61,6 @@ class MT_Model_Buffer:
         self.actions = []
         self.next_states = []
         self.dones = []
-
-        # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
-        self.welford_state_count = 1
-        self.welford_state_mean = torch.zeros(1)
-        self.welford_state_var_sum = torch.ones(1) # mean2
-        self.welford_action_count = 1
-        self.welford_action_mean = torch.zeros(1)
-        self.welford_action_var_sum = torch.ones(1) # mean2
 
         # This is the number of stored experiences, i.e. the number of calls to self.push.
         self.size = 0
@@ -131,38 +124,23 @@ class MT_Model_Buffer:
         if len(self.tasks[-1]) > 0:
             assert task == self.tasks[-1][-1]
 
-        self.tasks[-1].append(task)
-        self.states[-1].append(state)
-        self.actions[-1].append(action)
-        self.next_states[-1].append(next_state)
-        self.dones[-1].append(done)
+        # Cast to tensors and store.
+        self.tasks[-1].append(torch.tensor(task, dtype=float))
+        self.states[-1].append(torch.tensor(state, dtype=float))
+        self.actions[-1].append(torch.tensor(action, dtype=float))
+        self.next_states[-1].append(torch.tensor(next_state, dtype=float))
+        self.dones[-1].append(torch.tensor(done, dtype=bool).reshape(1))
 
         self.size += 1
 
         if done:
             # This prepares for pushes as part of a new trajectory.
             self._start_trajectory()
-
-        # Update welford normalization stats.
-        self.welford_state_count += 1
-        self.welford_action_count += 1
-
-        # state
-        delta = state - self.welford_state_mean
-        self.welford_state_mean += delta / self.welford_state_count
-        delta2 = state - self.welford_state_mean
-        self.welford_state_var_sum += delta * delta2
-        
-        # action
-        delta = action - self.welford_action_mean
-        self.welford_action_mean += delta / self.welford_action_count
-        delta2 = action - self.welford_action_mean
-        self.welford_action_var_sum += delta * delta2
     
 
     def _trim_buffer(self):
         """
-        Prepare for a call to self.sample by normalizing advantages and trimming empty sequences from self._start_trajectory.
+        Prepare for a call to self.sample by trimming empty sequences from self._start_trajectory.
         Cannot call self.push after self._trim_buffer until self.reset.
 
         Must be called after ending the last trajectory.
@@ -216,11 +194,11 @@ class MT_Model_Buffer:
             # Sample individual experiences.
         
             # Flatten experiences and cast to torch.Tensor.
-            flattened_tasks = torch.Tensor(np.concatenate(self.tasks)) # Retains the <task_size> dimension at the end.
-            flattened_states = torch.Tensor(np.concatenate(self.states)) # Retains the <state_size> dimension at the end.
-            flattened_actions = torch.Tensor(np.concatenate(self.actions))
-            flattened_next_states = torch.Tensor(np.concatenate(self.next_states)) # Retains the <state_size> dimension at the end.
-            flattened_dones = torch.Tensor(np.concatenate(self.dones))
+            flattened_tasks = torch.concat(self.tasks) # Retains the <task_size> dimension at the end.
+            flattened_states = torch.concat(self.states) # Retains the <state_size> dimension at the end.
+            flattened_actions = torch.concat(self.actions)
+            flattened_next_states = torch.concat(self.next_states) # Retains the <state_size> dimension at the end.
+            flattened_dones = torch.concat(self.dones)
             # These went from shape (<number_of_trajectories>, <trajectory_length>, <state_size for states>)
             # to shape (<number_of_experiences>, <state_size for states>).
 
@@ -274,81 +252,6 @@ class MT_Model_Buffer:
 
                 yield task_batch, state_batch, action_batch, next_state_batch, done_batch, not_padding_mask
 
-    
-    @staticmethod
-    def _normalize(value, welford_count, welford_mean, welford_var_sum, inplace=False):
-        variance = welford_var_sum / welford_count
-        stdev = np.sqrt(variance)
-        
-        if not inplace:
-            if isinstance(value, torch.Tensor):
-                value = torch.clone(value)
-            elif isinstance(value, np.ndarray):
-                value = np.copy(value)
-            elif type(value) in [int, float]:
-                pass
-            else:
-                raise RuntimeError(f"Unsupported type.\ntype(value): {type(value)}")
-        
-        if isinstance(value, torch.Tensor):
-            value[...] = torch.div(torch.sub(value, welford_mean), stdev)
-        else:
-            value[...] = (value - welford_mean) / stdev
-        return value
-    def normalize_state(self, state, inplace=False):
-        return self._normalize(value=state, welford_count=self.welford_state_count, welford_mean=self.welford_state_mean, welford_var_sum=self.welford_state_var_sum, inplace=inplace)
-    def normalize_action(self, action, inplace=False):
-        return self._normalize(value=action, welford_count=self.welford_action_count, welford_mean=self.welford_action_mean, welford_var_sum=self.welford_action_var_sum, inplace=inplace)
-
-    
-    @staticmethod
-    def _denormalize(value, welford_count, welford_mean, welford_var_sum, inplace=False):
-        variance = welford_var_sum / welford_count
-        stdev = torch.sqrt(variance)
-        
-        if not inplace:
-            if isinstance(value, torch.Tensor):
-                value = torch.clone(value)
-            elif isinstance(value, np.ndarray):
-                value = np.copy(value)
-            elif type(value) in [int, float]:
-                pass
-            else:
-                raise RuntimeError(f"Unsupported type.\ntype(value): {type(value)}")
-        
-        if isinstance(value, torch.Tensor):
-            value[...] = torch.mul(value, stdev).add(welford_mean)
-        else:
-            value[...] = value * stdev + welford_mean
-        return value
-    def denormalize_state(self, state, inplace=False):
-        return self._denormalize(value=state, welford_count=self.welford_state_count, welford_mean=self.welford_state_mean, welford_var_sum=self.welford_state_var_sum, inplace=inplace)
-    def denormalize_action(self, action, inplace=False):
-        return self._denormalize(value=action, welford_count=self.welford_action_count, welford_mean=self.welford_action_mean, welford_var_sum=self.welford_action_var_sum, inplace=inplace)
-    
-    
-    @staticmethod
-    def _denormalize(value, welford_state_count, welford_mean, welford_var_sum, inplace=False):
-        variance = welford_var_sum / welford_state_count
-        stdev = np.sqrt(variance)
-        
-        if not inplace:
-            if isinstance(value, np.ndarray):
-                value = np.copy(value)
-            elif isinstance(value, torch.Tensor):
-                value = torch.clone(value)
-            elif type(value) in [int, float]:
-                pass
-            else:
-                raise RuntimeError(f"Unsupported type.\ntype(value): {type(value)}")
-        
-        value[...] = value * stdev + welford_mean
-        return value
-    def denormalize_state(self, state, inplace=False):
-        return self._denormalize(value=state, welford_state_count=self.size, welford_mean=self.welford_state_mean, welford_var_sum=self.welford_state_var_sum, inplace=inplace)
-    def denormalize_action(self, action, inplace=False):
-        return self._denormalize(value=action, welford_state_count=self.size, welford_mean=self.welford_action_mean, welford_var_sum=self.welford_action_var_sum, inplace=inplace)
-
 
     @classmethod
     def merge_buffers(cls, buffers):
@@ -356,8 +259,7 @@ class MT_Model_Buffer:
         # Assert buffers have not tried to sample yet.
         for buffer in buffers:
             assert not buffer._trimmed, "buffer._trimmed should be False for all buffers, \
-                else they may have already attempted to sample and have called _trim_buffer. \
-                This is a problem because we want to call _trim_buffer to normalize advantages after merge_buffers."
+                else they may have already attempted to sample and have called _trim_buffer."
         
         # Create new buffer object.
         merged_buffer = cls()
@@ -384,9 +286,6 @@ class MT_Model_Buffer:
         
         # Prepare merged_buffer for possible future pushes.
         merged_buffer._start_trajectory()
-        
-        # TODO: merge buffer welford normalization stats.
-        raise NotImplementedError('TODO: implement merger of welford normalization statistics.')
             
         return merged_buffer
     
