@@ -236,7 +236,7 @@ if __name__ == "__main__":
         task_to_buffer_paths[task] = buffer_path
     # print(f"buffer_names:", *(path.name for path in task_buffer_paths), sep='\n') # debug
 
-    data_sizes = np.array([100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200, int(100000*(1-args.test_size))]).astype(int) # In ascending order of size.
+    data_sizes = np.flip(np.array([100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 51200, int(100000*(1-args.test_size))]).astype(int)) # In descending order of size.
     # data_sizes = np.append(100 * 2**np.arange(10), 90000).astype(int) # In ascending order of size.
     # data_sizes = np.geomspace(100, 100000, 10).astype(int) # In ascending order of size.
     # data_sizes = np.flip(np.sort(np.geomspace(5000, 100, 2).astype(int))) # In descending order of size. #  TODO:  -------------------------->RESTORE   TODO

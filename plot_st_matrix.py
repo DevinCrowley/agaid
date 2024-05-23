@@ -100,8 +100,7 @@ def eval_st_cross_task(env, actor, model, actor_env_task, model_task, buffer, mi
 
 
 if __name__ == '__main__':
-    # args = tyro.cli(Args)
-    args = Args
+    args = tyro.cli(Args)
 
     path_to_agaid = Path.cwd()
     assert path_to_agaid.name == "agaid"
