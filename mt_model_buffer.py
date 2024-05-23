@@ -168,9 +168,9 @@ class MT_Model_Buffer:
         if isinstance(value, torch.Tensor):
             value[...] = torch.div(torch.sub(value, mean), std)
         elif isinstance(value, np.ndarray):
-            value[...] = (value - mean) / std
+            value[...] = (value - mean.detach().cpu().numpy()) / std.detach().cpu().numpy()
         else:
-            value = (value - mean) / std
+            value = (value - mean.detach().cpu().numpy()) / std.detach().cpu().numpy()
         return value
     def normalize_state(self, state, inplace=False):
         if not hasattr(self, '_state_std_mean'):
@@ -184,9 +184,11 @@ class MT_Model_Buffer:
         return self._normalize(value=action, std=std, mean=mean, inplace=inplace)
     def compute_norms(self):
         if not hasattr(self, '_state_std_mean'):
-            self._state_std_mean = torch.std_mean(torch.from_numpy(np.concatenate(self.states)), dim=0)
+            # self._state_std_mean = torch.std_mean(torch.from_numpy(np.concatenate(self.states)), dim=0)
+            self._state_std_mean = torch.std_mean(torch.cat(list(map(torch.stack, self.states))), dim=0)
         if not hasattr(self, '_action_std_mean'):
-            self._action_std_mean = torch.std_mean(torch.from_numpy(np.concatenate(self.actions)), dim=0)
+            # self._action_std_mean = torch.std_mean(torch.from_numpy(np.concatenate(self.actions)), dim=0)
+            self._action_std_mean = torch.std_mean(torch.cat(list(map(torch.stack, self.actions))), dim=0)
     def copy_norms(self, buffer):
         if not hasattr(buffer, '_state_std_mean') or not hasattr(buffer, '_action_std_mean'):
             buffer.compute_norms()

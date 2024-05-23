@@ -1,3 +1,4 @@
+import pickle
 from importlib import  import_module
 from pathlib import Path
 import re
@@ -8,7 +9,7 @@ from dataclasses import dataclass
 
 import tyro
 # import ipdb as pdb #  for debugging
-from ipdb import set_trace
+# from ipdb import set_trace
 import numpy as np
 import torch
 import torch.nn as nn
@@ -24,6 +25,8 @@ from mt_model_buffer import MT_Model_Buffer
 class Args:
     env_id: str = "Pendulum-v1"
     """The id of the environment"""
+    exp_id: str = "200k_actors_mt_st"
+    """The id of the experiment"""
     actor_step: int = None
     """The number of steps for the actor checkpoints to load"""
     actor_run_name: str = None
@@ -73,9 +76,9 @@ def eval_st_cross_task(env, actor, model, actor_env_task, model_task, buffer, mi
             next_observation, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
 
-            normed_obs = buffer.normalize_state(observation)
-            normed_next_obs = buffer.normalize_state(next_observation)
-            normed_action = buffer.normalize_action(action)
+            normed_obs = torch.tensor(buffer.normalize_state(observation))
+            normed_next_obs = torch.tensor(buffer.normalize_state(next_observation))
+            normed_action = torch.tensor(buffer.normalize_action(action))
             pred_normed_next_obs = normed_obs + model(torch.cat([normed_obs, normed_action]))
             mse = (pred_normed_next_obs - normed_next_obs).pow(2).mean()
             mses.append(mse)
@@ -91,11 +94,14 @@ def eval_st_cross_task(env, actor, model, actor_env_task, model_task, buffer, mi
     if save_path:
         # print(f"Saving -- buffer.size: {buffer.size}, manual size: {sum(map(lambda e: len(e), buffer.states))}, len(buffer.states): {len(buffer.states)}") # debug
         pass
-    return actor_env_task, model_task, np.mean(mses)
+    
+    mse = float(torch.mean(torch.tensor(mses)))
+    return actor_env_task, model_task, mse
 
 
 if __name__ == '__main__':
-    args = tyro.cli(Args)
+    # args = tyro.cli(Args)
+    args = Args
 
     path_to_agaid = Path.cwd()
     assert path_to_agaid.name == "agaid"
@@ -146,7 +152,7 @@ if __name__ == '__main__':
         actor_run_names = []
         for actor_path in actor_dir.iterdir():
             if pattern.fullmatch(actor_path.name): actor_run_names.append(actor_path.name)
-    print(f"actor_run_names:", *actor_run_names, sep='\n')
+    # print(f"actor_run_names:", *actor_run_names, sep='\n')
 
     if not ray.is_initialized():
         ray.init()
@@ -178,7 +184,7 @@ if __name__ == '__main__':
         # actor.load_state_dict(torch.load(actor_path))
         save_dir = path_to_agaid / f"plot_logs/{args.env_id}/st_matrix/actor_env_task_{actor_env_task}"
 
-        run_dir = path_to_agaid / 'runs'
+        run_dir = path_to_agaid / 'runs' / args.env_id / args.exp_id
 
         buffer_path = path_to_agaid / f"offline_data/{args.env_id}/task_{actor_env_task}"
         buffer_path = list(buffer_path.iterdir())
@@ -208,14 +214,16 @@ if __name__ == '__main__':
 
             assert len(worker_ids) <= args.num_workers
             if len(worker_ids) == args.num_workers:
-                ready_id, worker_ids = ray.wait(worker_ids, num_returns=1)
-                ready_ids.append(ready_id)
-            worker_id = ray.remote(eval_st_cross_task).remote(env=deepcopy(env), actor=deepcopy(actor), actor_env_task=actor_env_task, model_task=model_task, buffer=buffer, min_total_steps=args.min_total_steps, max_episode_steps=args.max_episode_steps, noisy_actions=args.noisy_actions, save_path=save_path)
+                readied_ids, worker_ids = ray.wait(worker_ids, num_returns=1)
+                ready_ids += readied_ids
+            print(f"Beginning eval_st_cross_task for actor_env_task: {actor_env_task}, model_task: {model_task}")
+            worker_id = ray.remote(eval_st_cross_task).remote(env=deepcopy(env), actor=deepcopy(actor), model=model, actor_env_task=actor_env_task, model_task=model_task, buffer=buffer, min_total_steps=args.min_total_steps, max_episode_steps=args.max_episode_steps, noisy_actions=args.noisy_actions, save_path=save_path)
             worker_ids.append(worker_id)
     st_cross_tasks = ray.get(ready_ids + worker_ids)
     end_time = time.monotonic()
     duration = end_time - start_time
     print(f"Collection done. Duration: {duration/60:.2f} minutes")
 
-    for actor_env_task, model_task, mse in st_cross_tasks:
-        pass
+    save_path = path_to_agaid / f"plot_logs/{args.env_id}/st_cross_tasks"
+    with open(save_path, 'wb') as file:
+            pickle.dump(st_cross_tasks, file)

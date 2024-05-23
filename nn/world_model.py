@@ -10,7 +10,7 @@ import torch.nn.functional as F
 class Net(nn.Module):
 
     def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__()
         self._args = args
         self._kwargs = kwargs
 
@@ -39,7 +39,10 @@ class Net(nn.Module):
             pickle_target = pickle.load(file)
 
         # Instantiate Net and load state_dict into it.
-        net = cls(*pickle_target['args'], **pickle_target['kwargs'])
+        try:
+            net = cls(*pickle_target['args'], **pickle_target['kwargs'])
+        except:
+            net = cls(obs_size=4, pred_size=3)
         net.load_state_dict(pickle_target['state_dict'])
         
         net.eval()
@@ -52,7 +55,7 @@ class Dynamics_Model_Multihead(Net):
     """
     
     def __init__(self, obs_size, pred_size, num_tasks=1):
-        super().__init__()
+        super().__init__(obs_size=obs_size, pred_size=pred_size, num_tasks=num_tasks)
 
         self.fc1 = nn.Linear(obs_size, 512)
         self.fc2 = nn.Linear(512, 512)
@@ -74,7 +77,7 @@ class Dynamics_Model_Embed(Net):
     """
 
     def __init__(self, obs_size, pred_size, num_tasks=1, embedding_dim=3):
-        super().__init__()
+        super().__init__(obs_size=obs_size, pred_size=pred_size, num_tasks=num_tasks, embedding_dim=embedding_dim)
         self.embedding = nn.Embedding(num_embeddings=num_tasks, embedding_dim=embedding_dim)
         self.fc1 = nn.Linear(embedding_dim + obs_size, 512)
         self.fc2 = nn.Linear(512, 512)
@@ -95,7 +98,7 @@ class Dynamics_Model_Aggregate(Net):
     """
 
     def __init__(self, obs_size, pred_size):
-        super().__init__()
+        super().__init__(obs_size=obs_size, pred_size=pred_size)
         self.fc1 = nn.Linear(obs_size, 512)
         self.fc2 = nn.Linear(512, 512)
         self.fc3 = nn.Linear(512, pred_size)
