@@ -16,11 +16,9 @@ import torch.nn.functional as F
 import gymnasium as gym
 import ray
 
+from nn.world_model import Dynamics_Model_Multihead, Dynamics_Model_Embed, Dynamics_Model_Aggregate
 from mt_model_buffer import MT_Model_Buffer
 
-
-# TODO: load actor after initializing
-# TODO: fix normalization params early, from all data, pass through / attach to actor.
 
 @dataclass
 class Args:
@@ -32,9 +30,7 @@ class Args:
     """The exact string for actor_run_name, overwrites actor_run_name_pattern"""
     actor_run_name_pattern: str = "td3_continuous_action__task_g_\d+\.\d+\w*"
     """The regex pattern for each actor_run_name if actor_run_name is not provided"""
-    task: float = None
-    """the task value for this collection, if not provided it is inferred from the actor_run_name(s)"""
-    min_total_steps: int = 100000
+    min_total_steps: int = 1000
     """The minimum number of steps to collect episodes until"""
     max_episode_steps: int = 2000
     """The number of steps per episode to truncate at"""
@@ -59,12 +55,13 @@ class Args:
     # """the scale of exploration noise"""
 
 
-def collect_offline_data(env, actor, task, min_total_steps, max_episode_steps=np.inf, noisy_actions=True, save_path=None):
+def eval_st_cross_task(env, actor, model, actor_env_task, model_task, buffer, min_total_steps, max_episode_steps=np.inf, noisy_actions=False, save_path=None):
     actor.eval()
+    model.eval()
 
-    buffer = MT_Model_Buffer()
     total_steps = 0
     # print(f"\nStarting collection.") # debug
+    mses = []
     while total_steps < min_total_steps:
         # print(f"\nStarting episode:") # debug
         # Sample an episode.
@@ -75,27 +72,33 @@ def collect_offline_data(env, actor, task, min_total_steps, max_episode_steps=np
             action = actor(torch.Tensor(observation), noisy=noisy_actions).detach().numpy()
             next_observation, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
-            buffer.push(task=task, state=observation, action=action, next_state=next_observation, done=done)
-            # print(f"pushed to buffer: task, state, action: {task, observation, action}") # debug
-            # print(f"pushed to buffer -- buffer.size: {buffer.size}, manual size: {sum(map(lambda e: len(e), buffer.states))}, len(buffer.states): {len(buffer.states)}") # debug
+
+            normed_obs = buffer.normalize_state(observation)
+            normed_next_obs = buffer.normalize_state(next_observation)
+            normed_action = buffer.normalize_action(action)
+            pred_normed_next_obs = normed_obs + model(torch.cat([normed_obs, normed_action]))
+            mse = (pred_normed_next_obs - normed_next_obs).pow(2).mean()
+            mses.append(mse)
             if done:
                 # print(f"Episode done -- terminated: {terminated}, truncated: {truncated}") # debug
                 break
             else:
                 observation = next_observation
-        buffer.end_episode()
         total_steps += step + 1
     # print(f"Done sampling total_steps {total_steps} / min_total_steps {min_total_steps}") # debug
     # print(f"buffer.size: {buffer.size}, len(buffer.states): {len(buffer.states)}, buffer manual size: {sum((len(state_trj) for state_trj in buffer.states))}") # debug
     # env.close()
     if save_path:
         # print(f"Saving -- buffer.size: {buffer.size}, manual size: {sum(map(lambda e: len(e), buffer.states))}, len(buffer.states): {len(buffer.states)}") # debug
-        buffer.save(file_path=save_path, create_dir=True, parents=True, overwrite_file=True)
-    return buffer
+        pass
+    return actor_env_task, model_task, np.mean(mses)
 
 
 if __name__ == '__main__':
     args = tyro.cli(Args)
+
+    path_to_agaid = Path.cwd()
+    assert path_to_agaid.name == "agaid"
 
     path_to_cleanrl = Path("../cleanrl").expanduser().resolve()
     assert path_to_cleanrl.is_dir()
@@ -147,6 +150,7 @@ if __name__ == '__main__':
 
     if not ray.is_initialized():
         ray.init()
+
     worker_ids = []
     ready_ids = []
     start_time = time.monotonic()
@@ -162,36 +166,56 @@ if __name__ == '__main__':
             torch.manual_seed(args.seed)
         torch.backends.cudnn.deterministic = args.torch_deterministic
 
-        # Get task.
-        if args.task is not None:
-            task = args.task
-        else:
-            task_match = re.search('task_g_(?P<task>\d+(\.\d+)?)', actor_run_name)
-            assert task_match is not None
-            task = float(task_match.group('task'))
+        # Get actor_env_task.
+        task_match = re.search('task_g_(?P<task>\d+(\.\d+)?)', actor_run_name)
+        assert task_match is not None
+        actor_env_task = float(task_match.group('task'))
 
         # assert args.env_id == 'Pendulum-v1' # env-specific task specification. Note: redo Actor for different policy algo.
         # env = gym.make(args.env_id, render_mode=None, g=task)
-        env = gym.make('Pendulum-v1', render_mode=None, g=task)
+        env = gym.make('Pendulum-v1', render_mode=None, g=actor_env_task)
         actor = Actor(env)
-        actor.load_state_dict(torch.load(actor_path))
+        # actor.load_state_dict(torch.load(actor_path))
+        save_dir = path_to_agaid / f"plot_logs/{args.env_id}/st_matrix/actor_env_task_{actor_env_task}"
 
-        path_to_agaid = Path.cwd()
-        assert path_to_agaid.name == "agaid"
-        save_path = path_to_agaid / f"offline_data/{args.env_id}/task_{task}/min_total_steps_{args.min_total_steps}__actor__{actor_run_name}"
+        run_dir = path_to_agaid / 'runs'
 
+        buffer_path = path_to_agaid / f"offline_data/{args.env_id}/task_{actor_env_task}"
+        buffer_path = list(buffer_path.iterdir())
+        assert len(buffer_path) == 1
+        buffer_path = buffer_path[0]
+        buffer = MT_Model_Buffer.load(buffer_path, reinstantiate=True)
 
-        # buffer = collect_offline_data(env=env, actor=actor, task=task, min_total_steps=args.min_total_steps, max_episode_steps=args.max_episode_steps, save_path=save_path)
-        assert len(worker_ids) <= args.num_workers
-        if len(worker_ids) == args.num_workers:
-            ready_id, worker_ids = ray.wait(worker_ids, num_returns=1)
-            ready_ids.append(ready_id)
-            print(f"Finished sampling from {len(ready_ids)} / {len(actor_run_names)} actors")
-        worker_id = ray.remote(collect_offline_data).remote(env=deepcopy(env), actor=deepcopy(actor), task=task, min_total_steps=args.min_total_steps, max_episode_steps=args.max_episode_steps, noisy_actions=args.noisy_actions, save_path=save_path)
-        worker_ids.append(worker_id)
-        print(f"Sampling from actor: \n{actor_run_name}")
-    buffers = ray.get(ready_ids + worker_ids)
+        # Set data_size and data_size_dir to the largest.
+        max_data_size = 0
+        max_data_size_dir = None
+        for data_size_dir in run_dir.iterdir():
+            data_size = int(data_size_dir.name[len('data_size_'):])
+            if data_size > max_data_size:
+                max_data_size = data_size
+                max_data_size_dir = data_size_dir
+        data_size = max_data_size
+        data_size_dir = max_data_size_dir
+
+        st_dir = data_size_dir / 'single_task'
+        for task_dir in st_dir.iterdir():
+            model_task = float(task_dir.name[len('task_'):])
+            model_path = task_dir / 'aggregate' / 'aggregate.pkl'
+            assert model_path.is_file()
+            model = Dynamics_Model_Aggregate.load(model_path)
+
+            save_path = save_dir / f"model_task_{model_task}/horizon_1_losses"
+
+            assert len(worker_ids) <= args.num_workers
+            if len(worker_ids) == args.num_workers:
+                ready_id, worker_ids = ray.wait(worker_ids, num_returns=1)
+                ready_ids.append(ready_id)
+            worker_id = ray.remote(eval_st_cross_task).remote(env=deepcopy(env), actor=deepcopy(actor), actor_env_task=actor_env_task, model_task=model_task, buffer=buffer, min_total_steps=args.min_total_steps, max_episode_steps=args.max_episode_steps, noisy_actions=args.noisy_actions, save_path=save_path)
+            worker_ids.append(worker_id)
+    st_cross_tasks = ray.get(ready_ids + worker_ids)
     end_time = time.monotonic()
     duration = end_time - start_time
-    total_steps = sum((buffer.size for buffer in buffers))
-    print(f"Done. \nNum actors sampled: {len(actor_run_names)}\nTotal steps: {total_steps} \nDuration: {duration/3600:.2f} hours\nTime per step: {duration / max(1, total_steps):.2f} seconds\nSteps per sec: {total_steps / duration:.2f}")
+    print(f"Collection done. Duration: {duration/60:.2f} minutes")
+
+    for actor_env_task, model_task, mse in st_cross_tasks:
+        pass

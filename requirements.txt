@@ -1,0 +1,11 @@
+numpy
+torch
+tensorboard
+matplotlib
+tyro
+
+ray
+
+gymnasium[classic-control]
+
+ipdb

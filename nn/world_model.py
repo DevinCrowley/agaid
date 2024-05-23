@@ -26,7 +26,7 @@ class Net(nn.Module):
         #torch.save(self.state_dict(), file_path)
         pickle_target = {'args': self._args, 'kwargs': self._kwargs, 'state_dict': self.state_dict()}
         with open(file_path, 'wb') as file:
-            pickle.dump(file, pickle_target)
+            pickle.dump(pickle_target, file)
 
     @classmethod
     def load(cls, file_path):
