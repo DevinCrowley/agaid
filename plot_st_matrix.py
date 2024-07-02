@@ -190,6 +190,12 @@ if __name__ == '__main__':
         assert len(buffer_path) == 1
         buffer_path = buffer_path[0]
         buffer = MT_Model_Buffer.load(buffer_path, reinstantiate=True)
+        buffer.compute_norms()
+        buffer_husk = MT_Model_Buffer()
+        buffer_husk.copy_norms(buffer)
+        full_buffer = buffer
+        buffer = buffer_husk
+        del full_buffer
 
         # Set data_size and data_size_dir to the largest.
         max_data_size = 0
@@ -216,13 +222,14 @@ if __name__ == '__main__':
                 readied_ids, worker_ids = ray.wait(worker_ids, num_returns=1)
                 ready_ids += readied_ids
             print(f"Beginning eval_st_cross_task for actor_env_task: {actor_env_task}, model_task: {model_task}")
-            worker_id = ray.remote(eval_st_cross_task).remote(env=deepcopy(env), actor=deepcopy(actor), model=model, actor_env_task=actor_env_task, model_task=model_task, buffer=buffer, min_total_steps=args.min_total_steps, max_episode_steps=args.max_episode_steps, noisy_actions=args.noisy_actions, save_path=save_path)
+            worker_id = ray.remote(eval_st_cross_task).remote(env=deepcopy(env), actor=ray.put(deepcopy(actor)), model=ray.put(model), actor_env_task=actor_env_task, model_task=model_task, buffer=ray.put(buffer), min_total_steps=args.min_total_steps, max_episode_steps=args.max_episode_steps, noisy_actions=args.noisy_actions, save_path=save_path)
             worker_ids.append(worker_id)
     st_cross_tasks = ray.get(ready_ids + worker_ids)
     end_time = time.monotonic()
     duration = end_time - start_time
     print(f"Collection done. Duration: {duration/60:.2f} minutes")
 
-    save_path = path_to_agaid / f"plot_logs/{args.env_id}/st_cross_tasks"
+    save_path = path_to_agaid / f"plot_logs/{args.env_id}/{args.exp_id}/st_cross_tasks.pkl"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
     with open(save_path, 'wb') as file:
-            pickle.dump(st_cross_tasks, file)
+        pickle.dump(st_cross_tasks, file)
